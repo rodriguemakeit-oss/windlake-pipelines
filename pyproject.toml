@@ -1,0 +1,43 @@
+[project]
+name = "ltsa_data"
+version = "0.0.1"
+authors = [{ name = "contributor@example.com" }]
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "azure-search-documents",
+    "azure-ai-generative==1.0.0b11",
+    "azure-identity",
+    "openai",
+    "boto3",
+    "tiktoken",
+    "azure-ai-formrecognizer",
+    "azure-ai-documentintelligence",
+    "openpyxl",
+    "xlwings",
+    "rapidfuzz==3.13.0",
+    "pytesseract",
+    "pymupdf"
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "databricks-dlt",
+    "databricks-connect>=15.4,<15.5",
+    "ipykernel",
+]
+unit = [
+    "pytest",
+    "pyspark>=3.5,<3.6",
+]
+
+[project.scripts]
+main = "ltsa_data.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120

@@ -1,0 +1,190 @@
+generic_prompt: 
+  system:
+    main: |
+      <Context>
+      You are an AI assistant that helps me to find monthly availability of turbines in markdown text.
+      Monthly availability is always in percentage between 0 and 100%.
+      Each part is delimited by brackets <part></part>.
+      Each time I refer to a part I will give you #(name_of_the_part) (dont be case sensitive)
+
+      So you will in order
+      1. read #Instructions part
+      2. read my next message including data between <data></data> to solve what I ask you in #Instructions
+
+      Always answer in english. Never make things up.
+      Always check your answer twice before to answer to me.
+
+      Lets defined special and prior instructions, described as @instruction , (most important to less): Warning, Info.
+      @Important and prior instructions in #Instructions will be between double brackets [[]]. Be sure to respect them.
+      @Warning instruction are prior than (Important) instruction and will be between double @@.
+      </Context>
+
+      <Instructions>
+      You need to find the availability of all turbines in percentage between 0 to 100%.
+      [[NOTE If file_type=xlsx maybe you will have availability between 0 and 1, then convert it to be between 0-100.]]
+      Also you need to find if available the site availability.
+      Don't make things up, if you dont know or you are not sure send an empty json as an empty list.
+
+      Also it is uncommon that all turbines have same availability, and have same availability as site.
+      For the first case check twice, for the second case check twice if you don't find it give turbine null availability.
+      Never miss a turbine its very important that you return me all the turbines data and site if available.
+
+      I want a json structured with keys as follows (the data should always be a table and site availability in the end of the table / row)
+      - type(str): site or turbine depending on what you find
+      - turbine_id(str): ${turbine_id}
+      - monthly_availability(float)(@ensure type is float with two decimal as 2f@): you will have for each entry a dictionary where key is "YYYY-MM" and value the availability of each month
+
+      [[VERY IMPORTANT Dont return me cumulative, period till date, OYTD, availability. Focus on only retrieving monthly availability]]
+
+      ${where_to_find_availability}
+      ${how_to_find_availability}
+
+      The json always starts with ``` and ends with ```. It should be a list of dictionaries.
+
+      Dont make things up, and if you don't know because sometimes files will not include data send empty json.
+
+      Reminder: the data can be found in my next message.
+
+      You have to show me a valid json according to the content i give you in in my next message.
+      Even if you want to summarize the json because it indicate that the same structure is followed for the turbines dont do it.
+      Never show me a summary or a sample of the JSON!!! Remember I want an entire valid json !!!
+      Even if you find similar values in the json never summarize it.
+      Also take care that the JSON is well formatted to be read.
+      [[Before finalizing the response, validate that both turbine and site availability data have been included if available. This is crucial for a complete and accurate response. And check that all turbines have been included]]
+      </Instructions>
+    
+    lego: # customizable parts of the generic prompt
+      turbine_id: |
+        If type==turbine otherwise for site turbine_id=null.
+        A turbine_id is serial number of a turbine. Sometimes the serial number is not present and you should in this case return the turbine/machine name.
+        But remember that you should never skip providing the [[serial number]] if present in data.
+        In some cases turbine on 2 columns (for ex turbine, id, serial) combine those in turbine_id separated by ${SERIAL_NUMBER_SEP}.
+        Trim the result.
+      how_to_find_availability: |
+        You will have one value (till per date) per turbine / site no more than one.
+        If you find several values then check the dates that are year on year.
+        It can start any month of the year. I want only monthy and year to year data.
+        If data is more than a year ago its obvious its not the good table.
+        Take care of giving me site availability and turbine availability when available.
+        Don't miss site availability if exists.
+      where_to_find_availability: |
+        [[Please take care of taking monthly_availability in the same table for each turbine and for site.]]
+        Usually a table finishes with the row "Total" for ex.
+        If you want to mix data from different tables check if one table does not have all data needed for turbines and site in the same time.
+
+        For all turbines all data should be close in same table. Try to find site availability if available.
+        [[Site availability can be on another table but prio site availability in the same table as turbines if exist (site can be called average also in the table).]]
+
+  user: |
+    this is the data provided from a <file_type>${file_type}</file_type> file:
+    <data>
+    ${data}
+    </data>
+
+  # Follow-up turn of the completeness pass (see compute_generative_ai/completeness.py).
+  completion: |
+    Check your previous answer against the <data>: on large tables turbines are sometimes skipped.
+    Turbines you ALREADY returned (do not repeat them):
+    <already>${already}</already>
+    Return ONLY the turbines of the SAME availability table that are missing from this list,
+    with exactly the same JSON format, the same turbine_id convention and the same months as before
+    (monthly availability only, never cumulative / till date).
+    Do not return the site row. Never invent a turbine: only turbines present in the <data>.
+    If no turbine is missing, return an empty list:
+    ```json
+    []
+    ```
+
+custom_prompts: # Custom prompts for specific maintainers
+  dwt: # Deutsche Windtechnik
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability:
+      text: |
+        [[Process data from the ~'Energetic Availability of Wind Farms' table]]
+      extra: true
+
+  enercon:
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability: null
+
+  gamesa:
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability: null
+
+  ge: # General Electric
+    turbine_id:
+      text: |
+        @turbine id is called system number@
+        [[If a turbine has no system number in its availability row (e.g. 'WTG T01'), return its label exactly as written in that row.]]
+      extra: true
+    how_to_find_availability:
+      text: |
+        Choose wisely in function of what file_type value given in <file_type></file_type>
+        - If file_type = pdf
+        Then [[If there is a table called Availability (%) monthly evolution for the contractual year aerogenerator then take data from this table and the next one if needed]]
+        [[If the PDF has only a single availability value per turbine (e.g. a table called 'Availability Final Calculations' or similar with one row per turbine and no monthly columns), then this value IS the monthly availability for the report month. Use the report_year and report_month provided in <report_period> to build the YYYY-MM key.]]
+        [[Willogoleche-type GE reports (sections 'Plant Performance Overview - corrections' / 'Contractual Availability Monthly summary'):
+          a) If there is an 'ASSET OVERVIEW' table (one row per 'WTG Txx'): turbine availability = its 'Contractual Availability (%)' column for the month of the 'Time Range'; site availability = its 'Total' row. The site row also gets one key per month of the 'REFERENCE PERIOD HISTORY' table (last column 'Contractual Availability (%)'), skipping rows with '-' and months after the 'Time Range'.
+          b) Else if 'Plant Performance Overview - corrections' holds a table 'Turbine | System Number | ... | RPPBA ... Final': turbine availability = the 'Final' % column, turbine_id = '<Turbine>|<System Number>' (e.g. 'WTG-001|38171870'); site availability = the '<Month YYYY> Availability:' value above that table.
+          c) Else (that section says 'To be provided' and there is no ASSET OVERVIEW table): return ONLY the site row = 'Contractual Availability' of the summary if present, else the dashboard 'Availability factor for reporting month'.
+          Never copy the site or dashboard value to the turbines and never read turbine values from charts ('Availability by WTG', 'Turbine availability 96.99% and below', capacity factor charts).]]
+        - Else if file_type = xlsx
+        Then take data from a table called Final calculation
+      extra: true
+    where_to_find_availability:
+      text: |
+        [[Never never return empty json]].
+        Choose wisely in function of what file_type value given in <file_type></file_type>
+        - If file_type = pdf
+        Then @Use 'Production Based Availability (After MAL Adjustments) (%)' column if available. If only one availability value per turbine, assign it to the report month from <report_period>.@
+        - If file_type=xlsx
+        Then @availability is a column 'Production Based Availability (After MAL Adjustments) (%)'@. Take after MAL column.
+      extra: true
+
+  nordex acciona:
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability:
+      text: |
+        [[Dont take the data from a table that exposes data availability. remember we are looking for turbine availability]]
+      extra: true
+
+  sgre: # Siemens Gamesa Renewable Energy
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability:
+      text: |
+        [[Site availability should be called ~'Site summary' ~'Average', ~'Total' or ~'Average/Total' and should be in the same table as turbine availability. Never miss it. If not present then dont put in json.]]
+        [[Site availability may also be denoted by terms like "average", "overall", or "total performance". Be sure to check for these terms, especially if a direct mention of "site" is missing.]]
+        @Return site availability called as Average/Total@
+        @If you have find a table called ~'Monthly Availability(%) per turbine' then monthly availability is in this table and you should retrieve for data across all months in the table. Site availability is just before the table.@
+        @Else data is in table ~ 'Contractual availability' for monthly data and ~ 'Operational Year' for year to date.@
+
+        [VERY important please make sure the months you take are in reference to the one of the report. For instance if the report is at may 2020 but it says 12 lasts month then you should understand that it has 11 month before may 2020 also in table. never you will find 'future' data]
+      extra: true
+
+  suzlon:
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability:
+      text: |
+        @Turbine availability is only in month columns formated as 'MonthName Year'@. @Avoid data in Average HWS and Average LWS columns. [[Avoid taking data in other columns than month columns]]
+      extra: true
+
+  vestas:
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability:
+      text: |
+        'Site performance' as monthly site availability.
+        [[Do not omit this information when it is present]]
+        @Watchout sometimes the data i give you give you the first value of site availability is in the same cell like 'Site Performance x%</td>'@
+      extra: true
+
+  unknown: # For unknown maintainers
+    turbine_id: null
+    how_to_find_availability: null
+    where_to_find_availability: null

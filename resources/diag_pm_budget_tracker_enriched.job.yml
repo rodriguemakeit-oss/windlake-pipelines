@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Job one-shot — diagnostic pm_budget_tracker enrichi
+#
+# Enrichit gold.pm_budget_tracker avec toutes les colonnes IEC / production
+# / disponibilités, et écrit le résultat dans gold.diag_pm_budget_tracker_enriched.
+#
+# Pré-requis : les jobs upstream du pipeline principal ont tourné
+# (pm_budget_tracker, turbine_availability, slb_completeness_turbine).
+#
+# Déclenchement manuel uniquement (pas de schedule).
+# ─────────────────────────────────────────────────────────────────────────────
+
+resources:
+  jobs:
+    diag_pm_budget_tracker_enriched:
+      name: diag_pm_budget_tracker_enriched
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "5"
+            dependencies:
+              - ../dist/*.whl
+
+      tasks:
+        - task_key: diag_pm_budget_tracker_enriched
+          description: "Diagnostic — pm_budget_tracker enrichi avec IEC + disponibilités"
+          notebook_task:
+            notebook_path: ../src/gold/diag_pm_budget_tracker_enriched.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+          environment_key: default

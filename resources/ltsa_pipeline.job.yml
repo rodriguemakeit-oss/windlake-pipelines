@@ -1,0 +1,359 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LTSA main job — orchestrates 12 notebooks as a DAG
+#
+# This job carries the daily schedule (see `schedule` below). It is shared
+# across all bundle targets (dev, noprod, prod) — there is no per-target
+# schedule override, so every environment triggers on the same cron.
+#
+# Retry strategy — level 1 (per task):
+#   max_retries               → ${var.max_retries} (0=dev, 2=noprod, 3=prod)
+#   min_retry_interval_millis → 60 000 ms (1 min) between each attempt
+#   retry_on_timeout          → true: a timeout is treated as a retriable failure
+#
+# Parallelism:
+#   Databricks automatically runs in parallel any tasks that share no direct
+#   dependency (levels 3 and 6 of the DAG). No explicit configuration needed.
+#
+# Job parameters (overridable at launch):
+#   catalog   → target Unity Catalog name (e.g. ltsa_dev, ltsa_prod)
+#   run_date  → reprocessing date ISO 8601 (empty = current date)
+#
+# In notebooks, read parameters with:
+#   catalog   = dbutils.widgets.get("catalog")
+#   run_date  = dbutils.widgets.get("run_date")
+#   # Idempotent usage example:
+#   spark.sql(f"CREATE TABLE IF NOT EXISTS {catalog}.gold.wind_turbine_scope ...")
+# ─────────────────────────────────────────────────────────────────────────────
+
+resources:
+  jobs:
+    ltsa_pipeline:
+      name: ltsa_pipeline
+
+      # ── Daily schedule — active on every target (dev, noprod, prod) ────────
+      # pause_status: UNPAUSED is set explicitly so each `bundle deploy`
+      # (re)activates the schedule, even on dev. Without it, a job once
+      # deployed in mode: development (or paused by hand in the UI) would
+      # stay paused.
+      schedule:
+        quartz_cron_expression: "0 00 03 * * ?"
+        timezone_id: "Europe/Paris"
+        pause_status: UNPAUSED
+
+      # ── Job parameters (overridable via run_job_task) ──────────────────────
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: run_date
+          default: ""   # Empty = notebooks use current date
+        - name: gold_bucket
+          default: ${var.gold_bucket}
+
+      # ── Serverless Python environment ─────────────────────────────────────
+      # No cluster is defined → Databricks uses serverless compute.
+      # The .whl is built by `uv build --wheel` (defined in databricks.yml
+      # under artifacts.python_artifact) before each deployment.
+      environments:
+        - environment_key: default
+          spec:
+            # keep client standard v5 because it has tesseract-orc english installed
+            client: "5"
+            dependencies:
+              - ../dist/*.whl
+
+      # ── Task DAG ──────────────────────────────────────────────────────────
+      # DAG reading: A → B means "B only starts after A completes".
+      # Tasks with no shared dependency run in parallel automatically.
+      #
+      # Level 1 ──────────────────────────────────────────────────────────────
+      tasks:
+        - task_key: init_schemas
+          description: "Creates Unity Catalog schemas if missing (idempotent)"
+          notebook_task:
+            notebook_path: ../src/init_schemas.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: turbine_alias_load
+          description: "Silver — dim_turbine_report_alias (report-label → Telemetry crosswalk from SharePoint Excel)"
+          depends_on:
+            - task_key: init_schemas
+          notebook_task:
+            notebook_path: ../src/silver/turbine_alias_load.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              service_credential_name: ${var.service_credential_name}
+              secrets_manager_region: ${var.secrets_manager_region}
+              secrets_manager_id: ${var.secrets_manager_id}
+              sharepoint_tenant_name: "example.sharepoint.com"
+              sharepoint_site_name: "RGBU-EUROPE-TEAMOPERATION"
+              mapping_folder_path: "2_Operations/08_SHAREPOINT WITH EU LOCAL OPS/04_WIND/Monthly O&M Reporting"
+              mapping_file_name: "SGRE_Mapping_Table.xlsx"
+              # Tab of the same workbook holding the business-managed list of
+              # reports that must not be alerted on (see files_genai_ignored).
+              ignored_sheet_name: "_ignored_errors"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        # Level 2 ─────────────────────────────────────────────────────────────
+        - task_key: wind_turbine_scope
+          description: "Gold — dim_farm, dim_substation, dim_turbine + S3 export"
+          depends_on:
+            - task_key: init_schemas
+          notebook_task:
+            notebook_path: ../src/gold/wind_turbine_scope.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              schema: "{{job.parameters.catalog}}.gold"
+              gold_bucket: "{{job.parameters.gold_bucket}}"
+              ltsa_scope_regex: ${var.ltsa_scope_regex}
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        # Level 3 — 4 tasks in parallel ────────────────────────────────────
+        - task_key: wind_contracts_load
+          description: "Silver — turbine_scheduled_pm, maintenance_substation/farm + S3 export"
+          depends_on:
+            - task_key: wind_turbine_scope
+          notebook_task:
+            notebook_path: ../src/silver/wind_contracts_load.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              silver_schema: "{{job.parameters.catalog}}.silver"
+              gold_schema: "{{job.parameters.catalog}}.gold"
+              gold_bucket: "{{job.parameters.gold_bucket}}"
+              ltsa_scope_regex: ${var.ltsa_scope_regex}
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: wind_production_compute
+          description: "Gold — turbine_production, substation_production, farm_production"
+          depends_on:
+            - task_key: wind_turbine_scope
+          notebook_task:
+            notebook_path: ../src/gold/wind_production_compute.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              schema: "{{job.parameters.catalog}}.gold"
+              gold_bucket: "{{job.parameters.gold_bucket}}"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: wind_slb_loss_compute
+          description: "Gold — loss_10min_wind"
+          depends_on:
+            - task_key: wind_turbine_scope
+          notebook_task:
+            notebook_path: ../src/gold/wind_slb_loss_compute.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              schema: "{{job.parameters.catalog}}.gold"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: genai_availability_extract
+          description: "Silver — availability_genai, files_genai_processed"
+          depends_on:
+            - task_key: wind_turbine_scope
+          notebook_task:
+            notebook_path: ../src/silver/genai_availability_extract.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              schema: "silver"
+              service_credential_name: ${var.service_credential_name}
+              secrets_manager_region: ${var.secrets_manager_region}
+              secrets_manager_id: ${var.secrets_manager_id}
+              ia_model: ${var.ia_model}
+              ia_max_retries: "5"
+              ia_files_limit_per_run: ${var.ia_files_limit_per_run}
+              # Light spacing between files. Rate-limit (429) is now handled by
+              # the Retry-After backoff in LLMExtractor, so the previous blanket
+              # 60s/file (≈2h for a 120-file run) is no longer needed.
+              ia_sleep_sec: "3"
+              allowed_file_extensions: '["pdf", "xlsx"]'
+              debug: ${var.debug}
+              load_pickle: ${var.load_pickle}
+              use_tesseract: "true"
+              tesseract_lang: "eng"
+              tesseract_dpi: "150"
+              reports_volume_path: "/Volumes/{{job.parameters.catalog}}/raw/maintainer_reports"
+              data_volume_path: "/Volumes/{{job.parameters.catalog}}/silver/genai_data"
+              use_sharepoint: "true"
+              sharepoint_tenant_name: "example.sharepoint.com"
+              sharepoint_site_name: "RGBU-EUROPE-TEAMOPERATION"
+              sharepoint_folder_path: "2_Operations/08_SHAREPOINT WITH EU LOCAL OPS/04_WIND/Monthly O&M Reporting"
+              excel_mode: "openpyxl"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        # Level 4 ─────────────────────────────────────────────────────────────
+        - task_key: wind_slb_transform
+          description: "Silver — turbine_slb (depends on slb_loss + turbine_scope)"
+          depends_on:
+            - task_key: wind_slb_loss_compute
+            - task_key: wind_turbine_scope
+          notebook_task:
+            notebook_path: ../src/silver/wind_slb_transform.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              schema: "{{job.parameters.catalog}}.silver"
+              ltsa_scope_regex: ${var.ltsa_scope_regex}
+              lookback_n_months: "13"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        # Level 5 ─────────────────────────────────────────────────────────────
+        - task_key: wind_slb_aggregate
+          description: "Gold — slb_and_production (depends on slb_transform + production)"
+          depends_on:
+            - task_key: wind_slb_transform
+            - task_key: wind_production_compute
+          notebook_task:
+            notebook_path: ../src/gold/wind_slb_aggregate.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              gold_schema: "{{job.parameters.catalog}}.gold"
+              suffix_duration_col: "stop_duration_min"
+              suffix_mwh_col: "loss_value_mwh"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        # Level 6 — 3 tasks in parallel ────────────────────────────────────
+        - task_key: wind_availability_compute
+          description: "Gold — fact_turbine/substation/farm_availability, ianosm_budget_tracker"
+          depends_on:
+            - task_key: wind_slb_aggregate
+            - task_key: wind_contracts_load
+          notebook_task:
+            notebook_path: ../src/gold/wind_availability_compute.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              suffix_duration_col: "stop_duration_min"
+              suffix_mwh_col: "loss_value_mwh"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: genai_availability_match
+          description: "Gold+Silver — fact_genai_*_availability + mapping_file_* + telemetry_match/no_match"
+          depends_on:
+            - task_key: genai_availability_extract
+            - task_key: wind_turbine_scope
+            - task_key: turbine_alias_load
+          notebook_task:
+            notebook_path: ../src/gold/genai_availability_match.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              schema: "silver"
+              service_credential_name: ${var.service_credential_name}
+              secrets_manager_region: ${var.secrets_manager_region}
+              secrets_manager_id: ${var.secrets_manager_id}
+              ia_model: ${var.ia_model}
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: wind_slb_completeness_compute
+          description: "Gold — fact_slb_completeness_turbine + export S3"
+          depends_on:
+            - task_key: wind_slb_aggregate
+          notebook_task:
+            notebook_path: ../src/gold/wind_slb_completeness_compute.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              silver_schema: "{{job.parameters.catalog}}.silver"
+              gold_schema: "{{job.parameters.catalog}}.gold"
+              gold_bucket: "{{job.parameters.gold_bucket}}"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        # Level 7 — final task ────────────────────────────────────────────────
+        - task_key: wind_availability_merge
+          description: "Gold — turbine/substation/farm_availability + S3 export (final output table)"
+          depends_on:
+            - task_key: wind_availability_compute
+            - task_key: genai_availability_match
+            - task_key: wind_contracts_load
+          notebook_task:
+            notebook_path: ../src/gold/wind_availability_merge.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              catalog: "{{job.parameters.catalog}}"
+              gold_bucket: "{{job.parameters.gold_bucket}}"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: pm_budget_tracker_compute
+          description: "Gold — pm_budget_tracker (PowerBI-friendly view of ianosm_budget_tracker) + S3 export"
+          depends_on:
+            - task_key: wind_availability_compute
+          notebook_task:
+            notebook_path: ../src/gold/pm_budget_tracker_compute.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              gold_bucket: "{{job.parameters.gold_bucket}}"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+        - task_key: genai_notify_unprocessed
+          description: "Teams — alert listing reports not extracted / not matched to Telemetry"
+          depends_on:
+            - task_key: genai_availability_match
+          notebook_task:
+            notebook_path: ../src/silver/genai_notify_unprocessed.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              run_date: "{{job.parameters.run_date}}"
+              reports_volume_path: "/Volumes/{{job.parameters.catalog}}/raw/maintainer_reports"
+              allowed_file_extensions: '["pdf", "xlsx"]'
+              teams_webhook_url: ${var.teams_webhook_url}
+              max_lines: "60"
+          environment_key: default
+          max_retries: ${var.max_retries}
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+      # email_notifications are configured per target in databricks.yml
+      # (noprod and prod only) — see TODO blocks in that file.

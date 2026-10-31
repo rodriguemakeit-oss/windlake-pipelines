@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CD — Databricks Bundle Deploy (manual)
+#
+# Triggers ONLY on workflow_dispatch. No auto-deploy on push/merge.
+# Pick the target in the GitHub UI:
+#   noprod  → catalog: ltsa_dev,  SP: sp_ltsa_noprod
+#   prod    → catalog: ltsa_prod, SP: sp_ltsa_prod  (environment-gated)
+#
+# Required GitHub environments (Settings → Environments):
+#   noprod  : DATABRICKS_HOST + DATABRICKS_TOKEN secrets for the noprod SP
+#   prod    : DATABRICKS_HOST + DATABRICKS_TOKEN + Required reviewers
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CD — Databricks Bundle Deploy (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Python wheel
+    runs-on: ubuntu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install uv
+      - run: uv build --wheel
+      - uses: actions/upload-artifact@v3
+        with:
+          name: python-wheel
+          path: dist/*.whl
+          retention-days: 1
+
+  deploy:
+    name: Deploy → ${{ inputs.target }}
+    runs-on: ubuntu
+    needs: build
+    environment: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v3
+        with:
+          name: python-wheel
+          path: dist/
+      - uses: databricks/setup-cli@main
+      - name: Deploy bundle
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle deploy -t ${{ inputs.target }}
+
+  run-pipeline:
+    name: Run ltsa_pipeline → ${{ inputs.target }}
+    runs-on: ubuntu
+    needs: deploy
+    if: ${{ inputs.run_after_deploy }}
+    environment: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+      - name: Run pipeline
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle run -t ${{ inputs.target }} ltsa_pipeline

@@ -1,0 +1,66 @@
+# Standalone daily job for the GE Excel (.xlsx) GenAI extraction.
+#
+# GE monthly reports also ship as .xlsx (Paramo, Poland, ...). Some are saved
+# with formulas but no cached values, so base.py falls back to LibreOffice to
+# recalculate them (_materialize_excel_formulas). Serverless has no cluster init
+# scripts, so this job runs on the all-purpose LibreOffice cluster defined in
+# resources/libreoffice_cluster.cluster.yml.
+#
+# Secrets/params mirror the main pipeline's genai_availability_extract task
+# (AWS Secrets Manager via service credential + SharePoint source). The ltsa_data
+# wheel is attached as a cluster library to provide azure/openai/openpyxl/... deps.
+
+resources:
+  jobs:
+    genai_availability_extract_xlsx:
+      name: genai_availability_extract_xlsx
+
+      trigger:
+        periodic:
+          interval: 1
+          unit: DAYS
+
+      # Notifications are set per target in databricks.yml (prod → Teams), like
+      # ltsa_pipeline: the deployer is a service principal, so
+      # ${workspace.current_user.userName} resolved to an SP id and was dropped.
+
+      tasks:
+        - task_key: extract_xlsx
+          existing_cluster_id: ${resources.clusters.libreoffice_cluster.id}
+          notebook_task:
+            notebook_path: ../src/silver/genai_availability_extract.py
+            base_parameters:
+              catalog: ${var.catalog}
+              run_date: ""
+              schema: silver
+              service_credential_name: ${var.service_credential_name}
+              secrets_manager_region: ${var.secrets_manager_region}
+              secrets_manager_id: ${var.secrets_manager_id}
+              ia_model: ${var.ia_model}
+              ia_max_retries: "5"
+              # Small batch for the test run; bump / remove for a full backfill.
+              ia_files_limit_per_run: "10"
+              ia_sleep_sec: "3"
+              # xlsx only — this job is the Excel counterpart of the PDF pipeline.
+              allowed_file_extensions: '["xlsx", "xls", "xlsm", "xlsb"]'
+              excel_mode: openpyxl
+              data_volume_path: /Volumes/${var.catalog}/silver/genai_data
+              reports_volume_path: /Volumes/${var.catalog}/raw/maintainer_reports
+              debug: "false"
+              load_pickle: "false"
+              use_tesseract: "false"
+              tesseract_lang: eng
+              tesseract_dpi: "150"
+              use_sharepoint: "true"
+              sharepoint_tenant_name: example.sharepoint.com
+              sharepoint_site_name: RGBU-EUROPE-TEAMOPERATION
+              sharepoint_folder_path: "2_Operations/08_SHAREPOINT WITH EU LOCAL OPS/04_WIND/Monthly O&M Reporting"
+          libraries:
+            - whl: ../dist/*.whl
+          timeout_seconds: 7200
+          # The classic cluster's FIRST REPL after a cold start fails the Hive
+          # metastore init (transient); the retry hits the now-warm cluster and
+          # succeeds. So always allow a couple of retries.
+          max_retries: 2
+          min_retry_interval_millis: 30000
+          retry_on_timeout: false

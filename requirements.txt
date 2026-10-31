@@ -1,0 +1,13 @@
+azure-search-documents
+azure-ai-generative==1.0.0b11
+azure-identity
+openai
+boto3
+tiktoken
+azure-ai-formrecognizer --pre
+azure-ai-documentintelligence --pre
+openpyxl
+xlwings
+rapidfuzz==3.13.0
+pytesseract
+pymupdf

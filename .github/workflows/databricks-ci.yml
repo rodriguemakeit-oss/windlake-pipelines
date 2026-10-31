@@ -1,0 +1,103 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI — Pull Request validation
+#
+# Triggered on: any PR targeting `develop` or `main`
+#
+# Dry-run only:
+#   `databricks bundle validate` checks YAML syntax, cross-references
+#   (e.g. ${resources.jobs.ltsa_pipeline.id}), and bundle consistency
+#   WITHOUT deploying anything to Databricks.
+#
+# Authentication:
+#   - validate      : uses GitHub environment `noprod` (secrets DATABRICKS_HOST + DATABRICKS_TOKEN)
+#   - validate-prod : uses GitHub environment `prod`   (secrets DATABRICKS_HOST + DATABRICKS_TOKEN)
+#   Secrets are defined per environment in GitHub → Settings → Environments.
+#
+# This workflow does NOT deploy and does NOT run any job.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI — Databricks Bundle Validate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Bundle validate (target noprod)
+    runs-on: ubuntu
+    environment: noprod
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Installs the Databricks CLI (includes the `databricks bundle` command)
+      - name: Setup Databricks CLI
+        uses: databricks/setup-cli@main
+
+      # Build the Python wheel before validation
+      # (the bundle references ../dist/*.whl in the job environment)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build Python wheel
+        run: uv build --wheel
+        working-directory: ${{ github.workspace }}
+
+      # Validate the bundle against the noprod Databricks workspace.
+      # Also verifies that the SP has access to the workspace.
+      - name: Validate bundle (target noprod)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle validate -t noprod
+
+      # Python lint (syntax errors, unused imports, etc.)
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff check src/
+
+      # Unit tests
+      - name: Run tests
+        run: |
+          pip install pytest
+          pytest tests/ -v --tb=short
+        continue-on-error: false
+
+  # Extra validation against the PROD workspace — PRs targeting main only
+  validate-prod:
+    name: Bundle validate (target prod)
+    runs-on: ubuntu
+    if: github.base_ref == 'main'
+    environment: prod
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build Python wheel
+        run: uv build --wheel
+        working-directory: ${{ github.workspace }}
+
+      - name: Validate bundle (target prod)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle validate -t prod

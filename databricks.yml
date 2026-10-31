@@ -1,0 +1,216 @@
+# This is a Databricks asset bundle definition for ltsa_data.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+bundle:
+  name: ltsa_data
+  uuid: 00000000-0000-0000-0000-000000000000
+
+include:
+  - resources/*.yml
+  - resources/*/*.yml
+
+# Local archives (e.g. OneDrive/SharePoint downloads dropped at the repo root)
+# must never be uploaded: the workspace import rejects some zip formats and
+# fails the whole deploy ("only DEFLATED entries can have EXT descriptor").
+sync:
+  exclude:
+    - "*.zip"
+
+artifacts:
+  python_artifact:
+    type: whl
+    build: uv build --wheel
+
+# Variable declarations. Assigned per target below.
+variables:
+  catalog:
+    description: Unity Catalog catalog name (ltsa_dev or ltsa_prod)
+  usage_policy_id:
+    description: Usage/budget policy id (account-level "project_ltsa"). Prod only.
+    default: ""
+  gold_bucket:
+    description: Name of the gold storage bucket
+  max_retries:
+    description: Number of retries per task (0=dev, 2=noprod, 3=prod)
+    default: "0"
+  service_credential_name:
+    description: Databricks service credential for Azure secrets access
+  secrets_manager_id:
+    description: AWS Secrets Manager secret ID for Azure credentials
+  secrets_manager_region:
+    description: AWS region of the Secrets Manager
+    default: "eu-west-1"
+  ltsa_scope_regex:
+    description: Regex filter on turbine scope
+    default: "WIF_BE|WIF_NL|WIF_DE|WIF_IT|WIF_PL|WIF_RO|WIF_ES|WIF_GB|WIF_PT|WIF_AU|WIF_ZA"
+  ia_model:
+    description: Azure OpenAI model/deployment for the GenAI tasks (prod=gpt-5)
+    default: "gpt-4o"
+  ia_files_limit_per_run:
+    description: Max files processed per GenAI run (-1 = unlimited)
+    default: "200"
+  debug:
+    description: Enable debug mode in notebooks
+    default: "false"
+  load_pickle:
+    description: Load cached pickle files instead of reprocessing
+    default: "false"
+  teams_webhook_url:
+    description: Teams (Power Automate) incoming webhook for unprocessed-file alerts
+    default: "https://webhook.example.invalid"
+  cluster_single_user_name:
+    description: Single-user identity (service principal app ID) for the LibreOffice all-purpose cluster
+  libreoffice_policy_id:
+    description: Cluster policy ID governing the LibreOffice all-purpose cluster (LtsaPolicy; differs per workspace)
+  libreoffice_spark_version:
+    description: DBR for the LibreOffice cluster; must satisfy the target's LtsaPolicy (noprod allowlist 15.4/16.4; prod fixes auto:latest-lts = 18.x).
+    default: "16.4.x-scala2.12"
+
+targets:
+  # ── DEV (local) ─────────────────────────────────────────────────────────────
+  dev:
+    mode: production
+    default: true
+    workspace:
+      host: https://workspace.example.invalid/
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/dev
+    run_as:
+      service_principal_name: 00000000-0000-0000-0000-000000000000
+    permissions:
+      - service_principal_name: 00000000-0000-0000-0000-000000000000
+        level: CAN_MANAGE
+      - group_name: portfolio-org0004-default-ltsa
+        level: CAN_MANAGE
+    variables:
+      catalog: ltsa_dev
+      gold_bucket: "demo-data-bucket"
+      max_retries: "0"
+      service_credential_name: "rfgbu_ltsa_secrets_service_credential_noprod"
+      secrets_manager_id: "demo-document-bucket"
+      debug: "true"
+      load_pickle: "true"
+      cluster_single_user_name: "00000000-0000-0000-0000-000000000000"
+      libreoffice_policy_id: "001F9B1129F9BF6A"
+
+  # ── NOPROD (CI — branch develop) ────────────────────────────────────────────
+  # mode: production = no prefix, schedules active, explicit root_path required.
+  # Deployed by 00000000-0000-0000-0000-000000000000 service principal via GitHub Actions.
+  noprod:
+    mode: production
+    workspace:
+      host: https://workspace.example.invalid/
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/noprod
+    run_as:
+      service_principal_name: 00000000-0000-0000-0000-000000000000
+    variables:
+      catalog: ltsa_dev
+      gold_bucket: "demo-data-bucket"
+      max_retries: "2"
+      service_credential_name: "rfgbu_ltsa_secrets_service_credential_noprod"
+      secrets_manager_id: "demo-document-bucket"
+      debug: "true"
+      load_pickle: "true"
+      cluster_single_user_name: "00000000-0000-0000-0000-000000000000"
+      libreoffice_policy_id: "001F9B1129F9BF6A"
+    # TODO (phase 4): uncomment and set recipient addresses
+    # resources:
+    #   jobs:
+    #     ltsa_pipeline:
+    #       email_notifications:
+    #         on_failure:
+    #           - contributor@example.com
+    #         no_alert_for_skipped_runs: true
+    #     ltsa_pipeline_wrapper:
+    #       email_notifications:
+    #         on_failure:
+    #           - contributor@example.com
+    #         no_alert_for_skipped_runs: true
+    permissions:
+      - service_principal_name: 00000000-0000-0000-0000-000000000000
+        level: CAN_MANAGE
+      # noprod deployer SP (deployer_default_noprod) — not in the ltsa group, so
+      # granted explicitly to let it manage/redeploy bundle resources.
+      - service_principal_name: 00000000-0000-0000-0000-000000000000
+        level: CAN_MANAGE
+      - group_name: portfolio-org0004-default-ltsa
+        level: CAN_MANAGE
+
+  # ── PROD (CI — branch main) ──────────────────────────────────────────────────
+  # Deployed by 00000000-0000-0000-0000-000000000000 service principal via GitHub Actions.
+  # Requires GitHub Environment "production" approval before deploy.
+  prod:
+    mode: production
+    workspace:
+      host: https://workspace.example.invalid
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/prod
+    run_as:
+      service_principal_name: 00000000-0000-0000-0000-000000000000
+    variables:
+      catalog: ltsa_prod
+      gold_bucket: "demo-data-bucket"
+      max_retries: "3"
+      service_credential_name: "rfgbu_ltsa_secrets_service_credential_prod"
+      secrets_manager_id: "demo-document-bucket"
+      load_pickle: "true"
+      ia_files_limit_per_run: "-1"
+      ia_model: "gpt-5"
+      usage_policy_id: "00000000-0000-0000-0000-000000000000"  # project_ltsa
+      cluster_single_user_name: "00000000-0000-0000-0000-000000000000"
+      libreoffice_policy_id: "001CB46E886EC5DA"   # prod LtsaPolicy (Environment=prd)
+      libreoffice_spark_version: "16.4.x-scala2.12"  # DBR 18/Spark4 casse l'init Hive metastore ; 16.4 validé (policy assouplie côté admin)
+    # Notif quotidienne (succès + échec) vers le canal Teams "LTSA Daily Error Tracking".
+    resources:
+      jobs:
+        ltsa_pipeline:
+          # Governed tag (closed list) + account-level usage/budget policy.
+          budget_policy_id: ${var.usage_policy_id}
+          tags:
+            project: ltsa
+          email_notifications:
+            on_success:
+              - example.invalid@emea.teams.ms
+            on_failure:
+              - example.invalid@emea.teams.ms
+            no_alert_for_skipped_runs: true
+        diag_pm_budget_tracker_enriched:
+          budget_policy_id: ${var.usage_policy_id}
+          tags:
+            project: ltsa
+        genai_availability_extract_xlsx:
+          email_notifications:
+            on_success:
+              - example.invalid@emea.teams.ms
+            on_failure:
+              - example.invalid@emea.teams.ms
+            no_alert_for_skipped_runs: true
+        # Prod-only daily export of the unavailability cost table to the gold
+        # S3 bucket (source table only exists for the prod workspace).
+        unavailability_cost_sync:
+          name: unavailability_cost_sync
+          schedule:
+            quartz_cron_expression: "0 00 03 * * ?"
+            timezone_id: Europe/Paris
+            pause_status: UNPAUSED
+          parameters:
+            - name: source_table
+              default: ait_preprod_3_gold.unavailability_cost.unavailability_cost
+            - name: gold_bucket
+              default: ${var.gold_bucket}
+          environments:
+            - environment_key: default
+              spec:
+                client: "5"
+                dependencies:
+                  - ./dist/*.whl
+          tasks:
+            - task_key: sync_unavailability_cost
+              notebook_task:
+                notebook_path: ./src/gold/unavailability_cost_sync.py
+                base_parameters:
+                  source_table: "{{job.parameters.source_table}}"
+                  gold_bucket: "{{job.parameters.gold_bucket}}"
+              environment_key: default
+    permissions:
+      - service_principal_name: 00000000-0000-0000-0000-000000000000
+        level: CAN_MANAGE
+      - group_name: portfolio-org0004-default-ltsa
+        level: CAN_MANAGE

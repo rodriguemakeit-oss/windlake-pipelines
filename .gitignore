@@ -1,0 +1,43 @@
+.databricks/
+build/
+dist/
+__pycache__/
+*.egg-info
+.venv/
+scratch/**
+!scratch/README.md
+**/explorations/**
+**/!explorations/README.md
+.env
+.env.preprod
+.env.prod
+authenticate_preprod.sh
+authenticate_prod.sh
+_marius_code/*
+tools/_scratch/
+tickets.txt
+src/diag_*.py
+
+# Preprod tooling / one-shot jobs (not part of production bundle)
+tools/cluster_libreoffice.json
+tools/oneshot_genai_extract.json
+tools/probe_libreoffice_and_tracking.py
+tools/probe_libreoffice_and_tracking_nb.py
+
+# Ad-hoc verification notebooks
+src/silver/_verify_results.ipynb
+
+.DS_Store
+**/.DS_Store
+
+# Local configuration and generated files
+.env
+.env.*
+!.env.example
+!.env.sample
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+_scratch/
+*.log

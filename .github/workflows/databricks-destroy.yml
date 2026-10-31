@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Bundle Destroy — manual wipe of a Databricks target (noprod or prod)
+#
+# Purpose:
+#   Allow a clean reset of a target without going through a PR/merge cycle.
+#   `databricks bundle destroy` deletes ALL resources that the bundle currently
+#   manages in the target (jobs, pipelines, schedules, etc.), using the state
+#   stored at `${target.root_path}/state/`.
+#
+# What it does NOT delete:
+#   - Unity Catalog tables (those are owned by the catalog, not the bundle)
+#   - The bundle workspace files (only the deployed resources)
+#   - Resources NOT tracked by this bundle's state
+#
+# Trigger:
+#   Manual only (workflow_dispatch). Pick the target in the GitHub UI.
+#   Required reviewers (configured on each environment) gate the run.
+#
+# Runs as: the same SPs as the CD workflow (sp_ltsa_noprod / sp_ltsa_prod).
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Bundle Destroy (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  destroy:
+    name: Destroy → ${{ inputs.target }}
+    runs-on: ubuntu
+    environment: ${{ inputs.target }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Destroy bundle target
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle destroy -t ${{ inputs.target }} --auto-approve

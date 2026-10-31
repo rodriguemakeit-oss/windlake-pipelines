@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# All-purpose (interactive) cluster with LibreOffice installed via init script.
+#
+# LibreOffice runs headless on the driver to convert Office documents to PDF.
+# Conversion is driver-side work, so this is a single-node cluster.
+#
+# Compute policy: ${var.libreoffice_policy_id} (LtsaPolicy on dev/noprod).
+#   The policy FIXES is_single_node=true, runtime_engine=STANDARD, aws zone,
+#   and the governance custom_tags (Environment, CostCenter, Application=ltsa …).
+#   apply_policy_default_values pulls those in automatically, so we only set
+#   what the policy leaves open: node type, DBR, auto-termination, access mode.
+#
+# Access mode: SINGLE_USER (data_security_mode) — required so the cluster-scoped
+# init script runs without a Unity Catalog allowlist entry, and so the run_as
+# service principal owns the compute. Identity set per target via
+# ${var.cluster_single_user_name} (see databricks.yml).
+#
+# The init script is synced with the bundle (init/install_libreoffice.sh) and
+# referenced from its deployed workspace path via ${workspace.file_path}.
+# ─────────────────────────────────────────────────────────────────────────────
+resources:
+  clusters:
+    libreoffice_cluster:
+      cluster_name: ltsa-libreoffice
+      policy_id: ${var.libreoffice_policy_id}
+      apply_policy_default_values: true
+      kind: CLASSIC_PREVIEW          # required to allow is_single_node
+
+      # Left open by the policy — we provide them explicitly.
+      # spark_version must satisfy the target's LtsaPolicy (per-target via var);
+      # is_single_node is FIXED to true and node_type must be in the i3 allowlist.
+      spark_version: ${var.libreoffice_spark_version}
+      node_type_id: "i3.xlarge"
+      is_single_node: true           # required true by LtsaPolicy
+      autotermination_minutes: 30
+
+      # Dedicated (single-user) access mode — identity set per target.
+      data_security_mode: SINGLE_USER
+      single_user_name: ${var.cluster_single_user_name}
+
+      # Install LibreOffice on startup. Bundle syncs init/ to the workspace,
+      # so ${workspace.file_path} resolves to this deployment's synced files.
+      init_scripts:
+        - workspace:
+            destination: ${workspace.file_path}/init/install_libreoffice.sh
+
+      # The deployer SP creates the cluster but the job runs as a different SP
+      # (run_as). Grant the ltsa group CAN_MANAGE so the run_as SP can
+      # start/restart this all-purpose cluster.
+      permissions:
+        - group_name: portfolio-org0004-default-ltsa
+          level: CAN_MANAGE
