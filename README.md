@@ -1,27 +1,25 @@
 # Windlake Pipelines
 
-Pipelines de données éoliennes : extraction documentaire, disponibilité, production et suivi budgétaire.
+A Databricks Asset Bundle prototype for combining document-derived operational information with structured energy data.
 
-Version de portfolio maintenue sur [rodriguemakeit-oss](https://github.com/rodriguemakeit-oss).
+## What it demonstrates
 
-## Ce que le projet explore
+- Batch ingestion and transformation with Spark
+- Document parsing and language-model-assisted extraction
+- Availability calculations and curated Delta outputs
+- Bundle-based environment configuration and deployment workflows
 
-Pipelines de données éoliennes : extraction documentaire, disponibilité, production et suivi budgétaire. L’accent est mis sur la séparation des composants, la configuration explicite et la réutilisation des traitements.
+## Repository map
 
-## Structure
+- `src/` — reusable pipeline logic
+- `resources/` — Databricks job definitions
+- `docs/` — architecture, pipeline, and troubleshooting notes
+- `tests/` — local checks using fixtures
 
-`src/ · resources/ · teams_alert/ · docs/`
+## Before running
 
-## Prise en main
+See [GUIDE.md](GUIDE.md). You will need your own documents, telemetry sources, model endpoints, and Databricks workspace. Example hosts, identifiers, and storage settings are placeholders; no operational source files are included.
 
-Consultez [GUIDE.md](GUIDE.md) pour les commandes et la configuration détaillées.
+## Scope
 
-Les valeurs de déploiement sont des exemples. Les identifiants nuls et les domaines `example.invalid` doivent être remplacés dans votre propre environnement. Aucun déploiement cloud n’est lancé automatiquement.
-
-## État du projet
-
-Cette adaptation nécessite vos propres services et jeux de données. Les contrôles locaux sont décrits dans [VALIDATION.md](VALIDATION.md) ; ils ne constituent pas une validation des intégrations cloud.
-
-## Contributions et licences
-
-Les noms de packages, crédits d’auteurs et avis tiers conservés dans les sources s’appliquent à leurs composants respectifs. Aucune licence globale supplémentaire n’est attribuée à ce dépôt.
+This portfolio adaptation is not a production availability calculation. Validate source definitions, formulas, extraction quality, and review controls with your own domain experts. See [VALIDATION.md](VALIDATION.md).
